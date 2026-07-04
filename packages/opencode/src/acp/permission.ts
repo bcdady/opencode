@@ -58,6 +58,7 @@ export class Handler {
     const directory = originDirectory ?? session.cwd
 
     if (!this.input.connection.requestPermission) {
+      console.error(`[acp.permission] auto-reject: client did not advertise requestPermission capability (request ${permission.id})`)
       await this.reply(permission.id, "reject", directory)
       return
     }
@@ -67,15 +68,13 @@ export class Handler {
         sessionId: permission.sessionID,
         toolCall: await permissionToolCall({
           toolCallId: permission.tool?.callID ?? permission.id,
-          status: "pending",
-          title: permissionTitle(permission.permission, permission.metadata),
-          rawInput: permission.metadata,
-          kind: toToolKind(permission.permission),
-          locations: toLocations(permission.permission, permission.metadata),
-        },
+          toolName: permission.permission,
+          input: permission.metadata,
+        }),
         options: permissionOptions,
       })
-      .catch(async () => {
+      .catch(async (error) => {
+        console.error(`[acp.permission] auto-reject: requestPermission threw (request ${permission.id}):`, error)
         await this.reply(permission.id, "reject", directory)
         return undefined
       })
@@ -146,6 +145,10 @@ async function permissionToolCall(input: {
 function permissionTitle(toolName: string, input: ToolInput) {
   const tool = toolName.toLocaleLowerCase()
   switch (tool) {
+    case "bash":
+    case "shell":
+      return stringValue(input.command) ?? stringValue(input.cmd) ?? toolName
+
     case "external_directory":
       return stringValue(input.description) ?? stringValue(input.command) ?? stringValue(input.parentDir)
 
@@ -227,17 +230,6 @@ function selectedReply(result: RequestPermissionResponse): Reply {
   if (result.outcome.outcome !== "selected") return "reject"
   if (result.outcome.optionId === "once" || result.outcome.optionId === "always") return result.outcome.optionId
   return "reject"
-}
-
-function permissionTitle(toolName: string, metadata: Record<string, unknown>) {
-  if (toolName === "bash" || toolName === "shell") {
-    const command =
-      typeof metadata.command === "string" ? metadata.command
-      : typeof metadata.cmd === "string" ? metadata.cmd
-      : undefined
-    return command ?? toolName
-  }
-  return toolName
 }
 
 function stringValue(value: unknown) {
