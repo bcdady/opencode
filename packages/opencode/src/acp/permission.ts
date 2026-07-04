@@ -34,12 +34,14 @@ export class Handler {
     },
   ) {}
 
-  handle(event: PermissionEvent) {
+  handle(event: PermissionEvent, originDirectory?: string) {
     const permission = event.properties
     const previous = this.queues.get(permission.sessionID) ?? Promise.resolve()
     const next = previous
-      .then(() => this.process(event))
-      .catch(() => {})
+      .then(() => this.process(event, originDirectory))
+      .catch((error) => {
+        console.error(`[ACP] permission handling failed for request ${permission.id}:`, error)
+      })
       .finally(() => {
         if (this.queues.get(permission.sessionID) === next) {
           this.queues.delete(permission.sessionID)
@@ -48,13 +50,15 @@ export class Handler {
     this.queues.set(permission.sessionID, next)
   }
 
-  private async process(event: PermissionEvent) {
+  private async process(event: PermissionEvent, originDirectory?: string) {
     const permission = event.properties
     const session = await Effect.runPromise(this.input.session.tryGet(permission.sessionID))
     if (!session) return
 
+    const directory = originDirectory ?? session.cwd
+
     if (!this.input.connection.requestPermission) {
-      await this.reply(permission.id, "reject", session.cwd)
+      await this.reply(permission.id, "reject", directory)
       return
     }
 
@@ -63,13 +67,16 @@ export class Handler {
         sessionId: permission.sessionID,
         toolCall: await permissionToolCall({
           toolCallId: permission.tool?.callID ?? permission.id,
-          toolName: permission.permission,
-          input: permission.metadata,
-        }),
+          status: "pending",
+          title: permissionTitle(permission.permission, permission.metadata),
+          rawInput: permission.metadata,
+          kind: toToolKind(permission.permission),
+          locations: toLocations(permission.permission, permission.metadata),
+        },
         options: permissionOptions,
       })
       .catch(async () => {
-        await this.reply(permission.id, "reject", session.cwd)
+        await this.reply(permission.id, "reject", directory)
         return undefined
       })
 
@@ -77,7 +84,7 @@ export class Handler {
 
     const reply = selectedReply(result)
     if (reply !== "once" && reply !== "always") {
-      await this.reply(permission.id, "reject", session.cwd)
+      await this.reply(permission.id, "reject", directory)
       return
     }
 
@@ -85,7 +92,7 @@ export class Handler {
       await this.writeProposedEdit(session.id, permission.metadata).catch(() => {})
     }
 
-    await this.reply(permission.id, reply, session.cwd)
+    await this.reply(permission.id, reply, directory)
   }
 
   private async reply(requestID: string, reply: Reply, directory: string) {
@@ -220,6 +227,17 @@ function selectedReply(result: RequestPermissionResponse): Reply {
   if (result.outcome.outcome !== "selected") return "reject"
   if (result.outcome.optionId === "once" || result.outcome.optionId === "always") return result.outcome.optionId
   return "reject"
+}
+
+function permissionTitle(toolName: string, metadata: Record<string, unknown>) {
+  if (toolName === "bash" || toolName === "shell") {
+    const command =
+      typeof metadata.command === "string" ? metadata.command
+      : typeof metadata.cmd === "string" ? metadata.cmd
+      : undefined
+    return command ?? toolName
+  }
+  return toolName
 }
 
 function stringValue(value: unknown) {
